@@ -194,74 +194,69 @@
       schema: { hand: { type: 'string', default: 'left' } },
       init: function () {
         var color = this.data.hand === 'left' ? '#2ea3ff' : '#ff3b3b';
-        var trim = '#141414';
-        var strapColor = '#e8e4dc';
+        var trim = '#0c0c0c';
         var side = this.data.hand === 'left' ? 1 : -1;
-        var leather = { color: color, roughness: 0.32, metalness: 0.1 };
+        // Matte, not glossy - a shiny round shape is exactly what reads as
+        // a balloon rather than leather.
+        var leather = { color: color, roughness: 0.65, metalness: 0.02 };
 
-        // Wrist cuff, further back and wider than the old placeholder so
-        // the glove reads as a real cuff-then-pad silhouette rather than a
-        // fist on a stick.
+        // Narrow wrist cuff, set well back from the mitt.
         var cuff = document.createElement('a-cylinder');
-        cuff.setAttribute('radius', 0.065);
-        cuff.setAttribute('height', 0.12);
+        cuff.setAttribute('radius', 0.05);
+        cuff.setAttribute('height', 0.1);
         cuff.setAttribute('rotation', '90 0 0');
-        cuff.setAttribute('position', '0 0 0.08');
+        cuff.setAttribute('position', '0 0 0.1');
         cuff.setAttribute('material', leather);
         this.el.appendChild(cuff);
 
-        // Dark trim ring at the open end of the cuff
-        var cuffTrim = document.createElement('a-torus');
-        cuffTrim.setAttribute('radius', 0.065);
-        cuffTrim.setAttribute('radius-tubular', 0.008);
-        cuffTrim.setAttribute('rotation', '90 0 0');
-        cuffTrim.setAttribute('position', '0 0 0.14');
-        cuffTrim.setAttribute('material', { color: trim, roughness: 0.6 });
-        this.el.appendChild(cuffTrim);
+        // Thick black divider ring where the cuff meets the mitt - the
+        // sudden narrow-to-wide jump plus a bold black band is what makes
+        // this read as "glove" instead of a uniformly round blob.
+        var divider = document.createElement('a-torus');
+        divider.setAttribute('radius', 0.062);
+        divider.setAttribute('radius-tubular', 0.02);
+        divider.setAttribute('rotation', '90 0 0');
+        divider.setAttribute('position', '0 0 0.045');
+        divider.setAttribute('material', { color: trim, roughness: 0.7 });
+        this.el.appendChild(divider);
 
-        // Velcro strap patch on the cuff
-        var strap = document.createElement('a-box');
-        strap.setAttribute('width', 0.1);
-        strap.setAttribute('height', 0.055);
-        strap.setAttribute('depth', 0.008);
-        strap.setAttribute('position', '0 0 0.135');
-        strap.setAttribute('material', { color: strapColor, roughness: 0.7 });
-        this.el.appendChild(strap);
+        // Main mitt: a squat, wide cylinder (not a sphere) - a cylinder's
+        // flat top/bottom silhouette reads as a flattened puffy pad, where
+        // a sphere just reads as round from every angle no matter how
+        // it's scaled.
+        var mitt = document.createElement('a-cylinder');
+        mitt.setAttribute('radius', 0.105);
+        mitt.setAttribute('height', 0.15);
+        mitt.setAttribute('rotation', '90 0 0');
+        mitt.setAttribute('position', '0 0 -0.06');
+        mitt.setAttribute('material', leather);
+        this.el.appendChild(mitt);
 
-        // Dark seam where the cuff meets the padded mitt
-        var seam = document.createElement('a-torus');
-        seam.setAttribute('radius', 0.078);
-        seam.setAttribute('radius-tubular', 0.007);
-        seam.setAttribute('rotation', '90 0 0');
-        seam.setAttribute('position', '0 0 0.015');
-        seam.setAttribute('material', { color: trim, roughness: 0.6 });
-        this.el.appendChild(seam);
-
-        // Main padded mitt - big rounded body, tapering forward
-        var body = document.createElement('a-sphere');
-        body.setAttribute('radius', 0.115);
-        body.setAttribute('scale', '1.05 0.95 1.2');
-        body.setAttribute('position', '0 0 -0.08');
-        body.setAttribute('material', leather);
-        this.el.appendChild(body);
-
-        // Rounded knuckle-padding ridge along the top-front of the mitt
-        var ridge = document.createElement('a-sphere');
-        ridge.setAttribute('radius', 0.08);
-        ridge.setAttribute('scale', '1 0.55 1');
-        ridge.setAttribute('position', '0 0.05 -0.12');
-        ridge.setAttribute('material', leather);
-        this.el.appendChild(ridge);
+        // Rounded front cap so the punching face isn't a flat disc
+        var cap = document.createElement('a-sphere');
+        cap.setAttribute('radius', 0.105);
+        cap.setAttribute('scale', '1 1 0.85');
+        cap.setAttribute('position', '0 0 -0.125');
+        cap.setAttribute('material', leather);
+        this.el.appendChild(cap);
 
         // Thumb bump
         var thumb = document.createElement('a-sphere');
-        thumb.setAttribute('radius', 0.042);
-        thumb.setAttribute('position', (side * 0.09) + ' 0.005 -0.035');
+        thumb.setAttribute('radius', 0.04);
+        thumb.setAttribute('position', (side * 0.1) + ' 0.02 -0.03');
         thumb.setAttribute('material', leather);
         this.el.appendChild(thumb);
 
         window.__gloveEls = window.__gloveEls || {};
         window.__gloveEls[this.data.hand] = this.el;
+
+        // B button (right controller only) exits VR mode.
+        if (this.data.hand === 'right') {
+          this.el.addEventListener('bbuttondown', function () {
+            var scene = document.querySelector('a-scene');
+            if (scene && scene.exitVR) scene.exitVR();
+          });
+        }
 
         // World-space velocity, smoothed a bit to iron out per-frame pose
         // jitter while staying responsive enough to tell a jab from a hook
