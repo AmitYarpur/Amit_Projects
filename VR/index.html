@@ -6,38 +6,175 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
   <script>
-    // --- Target textures: a glowing ring + fist emoji drawn on canvas,
-    // generated once per hand and reused for every spawned target so we
-    // never touch the canvas API mid-game.
+    // --- The six basic punches: lead hand = left, rear hand = right.
+    // Each maps to a required approach direction for the glove at contact
+    // (see classifyPunch) plus a display name used on the hit-feedback
+    // popup, so hitting the target with the correct hand alone isn't
+    // enough - it also has to be thrown as that punch.
+    var PUNCH_DEFS = {
+      left_straight:  { name: 'JAB',           number: 1 },
+      right_straight: { name: 'CROSS',          number: 2 },
+      left_hook:      { name: 'LEAD HOOK',      number: 3 },
+      right_hook:     { name: 'REAR HOOK',      number: 4 },
+      left_uppercut:  { name: 'LEAD UPPERCUT',  number: 5 },
+      right_uppercut: { name: 'REAR UPPERCUT',  number: 6 }
+    };
+    var PUNCH_TYPES = ['straight', 'hook', 'uppercut'];
+
+    // Classifies a glove's current velocity into one of the three punch
+    // shapes by whichever axis is moving fastest: mostly upward -> uppercut,
+    // mostly sideways -> hook, otherwise (forward, away from the body) ->
+    // straight. Returns null below the minimum speed, so resting a glove
+    // on a target (rather than actually throwing a punch) never counts.
+    function classifyPunch(vel) {
+      var MIN_PUNCH_SPEED = 0.6; // m/s
+      if (vel.length() < MIN_PUNCH_SPEED) return null;
+      var absX = Math.abs(vel.x), absY = Math.abs(vel.y), absZ = Math.abs(vel.z);
+      if (vel.y > 0 && absY >= absX && absY >= absZ) return 'uppercut';
+      if (absX >= absZ) return 'hook';
+      return 'straight';
+    }
+
+    // --- Sound effects, synthesized with the Web Audio API rather than
+    // loaded from an audio file. The context is created lazily on first
+    // use (not at page load) since browsers require a user gesture -
+    // by the time any punch lands, the player has already interacted
+    // with the page (at minimum, tapping "Enter VR").
+    var __audioCtx = null;
+    function getAudioCtx() {
+      if (!__audioCtx) {
+        var AudioCtor = window.AudioContext || window.webkitAudioContext;
+        __audioCtx = new AudioCtor();
+      }
+      if (__audioCtx.state === 'suspended') __audioCtx.resume();
+      return __audioCtx;
+    }
+
+    // Punchy impact: a low thump (pitch dropping fast) layered with a
+    // short burst of filtered noise for the "crack" of a clean hit.
+    function playHitSound() {
+      var ctx = getAudioCtx();
+      var now = ctx.currentTime;
+
+      var thump = ctx.createOscillator();
+      thump.type = 'sine';
+      thump.frequency.setValueAtTime(190, now);
+      thump.frequency.exponentialRampToValueAtTime(55, now + 0.13);
+      var thumpGain = ctx.createGain();
+      thumpGain.gain.setValueAtTime(0.9, now);
+      thumpGain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
+      thump.connect(thumpGain).connect(ctx.destination);
+      thump.start(now);
+      thump.stop(now + 0.16);
+
+      var noiseBuffer = ctx.createBuffer(1, Math.floor(ctx.sampleRate * 0.08), ctx.sampleRate);
+      var data = noiseBuffer.getChannelData(0);
+      for (var i = 0; i < data.length; i++) {
+        data[i] = (Math.random() * 2 - 1) * (1 - i / data.length);
+      }
+      var noise = ctx.createBufferSource();
+      noise.buffer = noiseBuffer;
+      var noiseFilter = ctx.createBiquadFilter();
+      noiseFilter.type = 'bandpass';
+      noiseFilter.frequency.value = 2400;
+      var noiseGain = ctx.createGain();
+      noiseGain.gain.setValueAtTime(0.5, now);
+      noiseGain.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
+      noise.connect(noiseFilter).connect(noiseGain).connect(ctx.destination);
+      noise.start(now);
+    }
+
+    // Soft descending tone for a miss / wrong hand / wrong technique -
+    // a clearly different, deflating sound rather than a percussive hit.
+    function playMissSound() {
+      var ctx = getAudioCtx();
+      var now = ctx.currentTime;
+      var osc = ctx.createOscillator();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(320, now);
+      osc.frequency.exponentialRampToValueAtTime(110, now + 0.22);
+      var gain = ctx.createGain();
+      gain.gain.setValueAtTime(0.32, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.24);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(now);
+      osc.stop(now + 0.25);
+    }
+
+    // --- Target textures: a round training-pad disc drawn on canvas -
+    // black pad, a colored rim (blue for lead/left, red for rear/right,
+    // matching the gloves), and the pad's number in a white circle at
+    // its center, mirroring a real boxing-pad trainer's numbered pads.
+    // Generated once per hand+type combo and reused for every spawned
+    // target so we never touch the canvas API mid-game.
     var __targetTextureCache = {};
-    function getTargetTexture(hand) {
-      if (__targetTextureCache[hand]) return __targetTextureCache[hand];
-      var color = hand === 'left' ? '#2ea3ff' : '#ff3b3b';
-      var glyph = hand === 'left' ? '\u{1F91B}' : '\u{1F91C}'; // left/right-facing fist
+    function getTargetTexture(hand, type) {
+      var key = hand + '_' + type;
+      if (__targetTextureCache[key]) return __targetTextureCache[key];
+      var rimColor = hand === 'left' ? '#2ea3ff' : '#ff3b3b';
+      var number = PUNCH_DEFS[key] ? PUNCH_DEFS[key].number : '';
       var size = 256;
       var canvas = document.createElement('canvas');
       canvas.width = size;
       canvas.height = size;
       var ctx = canvas.getContext('2d');
       ctx.clearRect(0, 0, size, size);
+
+      // colored rim
       ctx.beginPath();
-      ctx.arc(size / 2, size / 2, size / 2 - 10, 0, Math.PI * 2);
-      ctx.fillStyle = color + '30';
+      ctx.arc(size / 2, size / 2, size / 2 - 6, 0, Math.PI * 2);
+      ctx.fillStyle = rimColor;
       ctx.fill();
-      ctx.lineWidth = 12;
-      ctx.strokeStyle = color;
+
+      // black pad body, inset from the rim
+      ctx.beginPath();
+      ctx.arc(size / 2, size / 2, size / 2 - 24, 0, Math.PI * 2);
+      ctx.fillStyle = '#161616';
+      ctx.fill();
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = 'rgba(255,255,255,0.12)';
       ctx.stroke();
+
+      // white-ringed number circle at the center
+      var circleRadius = size * 0.19;
       ctx.beginPath();
-      ctx.arc(size / 2, size / 2, size / 2 - 30, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(6,6,14,0.88)';
+      ctx.arc(size / 2, size / 2, circleRadius, 0, Math.PI * 2);
+      ctx.fillStyle = '#101010';
       ctx.fill();
-      ctx.font = Math.round(size * 0.5) + 'px sans-serif';
+      ctx.lineWidth = 5;
+      ctx.strokeStyle = '#ffffff';
+      ctx.stroke();
+
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold ' + Math.round(size * 0.16) + 'px sans-serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillText(glyph, size / 2, size / 2 + size * 0.03);
+      ctx.fillText(String(number), size / 2, size / 2 + size * 0.01);
+
       var url = canvas.toDataURL('image/png');
-      __targetTextureCache[hand] = url;
+      __targetTextureCache[key] = url;
       return url;
+    }
+
+    // Floating text that rises and fades at the hit location, naming the
+    // punch just landed (only shown for a clean, correctly-thrown hit).
+    function showPunchLabel(hand, type, worldPos) {
+      var def = PUNCH_DEFS[hand + '_' + type];
+      if (!def) return;
+      var color = hand === 'left' ? '#2ea3ff' : '#ff3b3b';
+      var scene = document.querySelector('a-scene');
+      var el = document.createElement('a-entity');
+      el.setAttribute('position', worldPos.x + ' ' + (worldPos.y + 0.12) + ' ' + worldPos.z);
+      el.setAttribute('text', { value: def.name, align: 'center', color: color, width: 3.2 });
+      el.setAttribute('animation__rise', {
+        property: 'position', to: worldPos.x + ' ' + (worldPos.y + 0.5) + ' ' + worldPos.z,
+        dur: 550, easing: 'easeOutQuad'
+      });
+      el.setAttribute('animation__fade', { property: 'text.opacity', to: 0, dur: 550, easing: 'easeOutQuad' });
+      scene.appendChild(el);
+      setTimeout(function () {
+        if (el.parentNode) el.parentNode.removeChild(el);
+      }, 600);
     }
 
     // Fires a short controller vibration on hit/miss, when the browser +
@@ -59,31 +196,99 @@
       schema: { hand: { type: 'string', default: 'left' } },
       init: function () {
         var color = this.data.hand === 'left' ? '#2ea3ff' : '#ff3b3b';
+        var trim = '#141414';
+        var strapColor = '#e8e4dc';
+        var side = this.data.hand === 'left' ? 1 : -1;
+        var leather = { color: color, roughness: 0.32, metalness: 0.1 };
 
+        // Wrist cuff, further back and wider than the old placeholder so
+        // the glove reads as a real cuff-then-pad silhouette rather than a
+        // fist on a stick.
         var cuff = document.createElement('a-cylinder');
-        cuff.setAttribute('radius', 0.045);
-        cuff.setAttribute('height', 0.09);
-        cuff.setAttribute('color', '#161616');
+        cuff.setAttribute('radius', 0.065);
+        cuff.setAttribute('height', 0.12);
         cuff.setAttribute('rotation', '90 0 0');
-        cuff.setAttribute('position', '0 0 0.05');
+        cuff.setAttribute('position', '0 0 0.08');
+        cuff.setAttribute('material', leather);
         this.el.appendChild(cuff);
 
-        var fist = document.createElement('a-sphere');
-        fist.setAttribute('radius', 0.09);
-        fist.setAttribute('color', color);
-        fist.setAttribute('scale', '1 0.85 1.2');
-        fist.setAttribute('position', '0 0 -0.06');
-        fist.setAttribute('material', 'roughness: 0.55; metalness: 0.05');
-        this.el.appendChild(fist);
+        // Dark trim ring at the open end of the cuff
+        var cuffTrim = document.createElement('a-torus');
+        cuffTrim.setAttribute('radius', 0.065);
+        cuffTrim.setAttribute('radius-tubular', 0.008);
+        cuffTrim.setAttribute('rotation', '90 0 0');
+        cuffTrim.setAttribute('position', '0 0 0.14');
+        cuffTrim.setAttribute('material', { color: trim, roughness: 0.6 });
+        this.el.appendChild(cuffTrim);
 
+        // Velcro strap patch on the cuff
+        var strap = document.createElement('a-box');
+        strap.setAttribute('width', 0.1);
+        strap.setAttribute('height', 0.055);
+        strap.setAttribute('depth', 0.008);
+        strap.setAttribute('position', '0 0 0.135');
+        strap.setAttribute('material', { color: strapColor, roughness: 0.7 });
+        this.el.appendChild(strap);
+
+        // Dark seam where the cuff meets the padded mitt
+        var seam = document.createElement('a-torus');
+        seam.setAttribute('radius', 0.078);
+        seam.setAttribute('radius-tubular', 0.007);
+        seam.setAttribute('rotation', '90 0 0');
+        seam.setAttribute('position', '0 0 0.015');
+        seam.setAttribute('material', { color: trim, roughness: 0.6 });
+        this.el.appendChild(seam);
+
+        // Main padded mitt - big rounded body, tapering forward
+        var body = document.createElement('a-sphere');
+        body.setAttribute('radius', 0.115);
+        body.setAttribute('scale', '1.05 0.95 1.2');
+        body.setAttribute('position', '0 0 -0.08');
+        body.setAttribute('material', leather);
+        this.el.appendChild(body);
+
+        // Rounded knuckle-padding ridge along the top-front of the mitt
+        var ridge = document.createElement('a-sphere');
+        ridge.setAttribute('radius', 0.08);
+        ridge.setAttribute('scale', '1 0.55 1');
+        ridge.setAttribute('position', '0 0.05 -0.12');
+        ridge.setAttribute('material', leather);
+        this.el.appendChild(ridge);
+
+        // Thumb bump
         var thumb = document.createElement('a-sphere');
-        thumb.setAttribute('radius', 0.032);
-        thumb.setAttribute('color', color);
-        thumb.setAttribute('position', (this.data.hand === 'left' ? '0.07' : '-0.07') + ' 0.02 -0.02');
+        thumb.setAttribute('radius', 0.042);
+        thumb.setAttribute('position', (side * 0.09) + ' 0.005 -0.035');
+        thumb.setAttribute('material', leather);
         this.el.appendChild(thumb);
 
         window.__gloveEls = window.__gloveEls || {};
         window.__gloveEls[this.data.hand] = this.el;
+
+        // World-space velocity, smoothed a bit to iron out per-frame pose
+        // jitter while staying responsive enough to tell a jab from a hook
+        // from an uppercut at the moment of contact.
+        this.velocity = new AFRAME.THREE.Vector3();
+        this._lastPos = new AFRAME.THREE.Vector3();
+        this._scratchPos = new AFRAME.THREE.Vector3();
+        this._hasLastPos = false;
+      },
+      tick: function (time, delta) {
+        if (!delta) return;
+        var dt = delta / 1000;
+        this.el.object3D.getWorldPosition(this._scratchPos);
+        if (!this._hasLastPos) {
+          this._lastPos.copy(this._scratchPos);
+          this._hasLastPos = true;
+          return;
+        }
+        var vx = (this._scratchPos.x - this._lastPos.x) / dt;
+        var vy = (this._scratchPos.y - this._lastPos.y) / dt;
+        var vz = (this._scratchPos.z - this._lastPos.z) / dt;
+        this.velocity.x += (vx - this.velocity.x) * 0.55;
+        this.velocity.y += (vy - this.velocity.y) * 0.55;
+        this.velocity.z += (vz - this.velocity.z) * 0.55;
+        this._lastPos.copy(this._scratchPos);
       }
     });
 
@@ -92,6 +297,7 @@
     AFRAME.registerComponent('flying-target', {
       schema: {
         hand: { type: 'string', default: 'left' },
+        type: { type: 'string', default: 'straight' }, // straight | hook | uppercut
         speed: { type: 'number', default: 4.5 }
       },
       init: function () {
@@ -106,7 +312,7 @@
         // which would truncate mid-parse if concatenated into that string form.
         this.el.setAttribute('material', {
           shader: 'flat',
-          src: getTargetTexture(this.data.hand),
+          src: getTargetTexture(this.data.hand, this.data.type),
           transparent: true,
           side: 'double'
         });
@@ -130,7 +336,17 @@
           correctGlove.object3D.getWorldPosition(this.glovePos);
           if (this.worldPos.distanceTo(this.glovePos) < this.hitRadius) {
             this.finish();
-            if (window.gameManager) window.gameManager.registerHit(this.data.hand);
+            var gloveComp = correctGlove.components['boxing-glove'];
+            var thrown = gloveComp ? classifyPunch(gloveComp.velocity) : null;
+            if (window.gameManager) {
+              if (thrown === this.data.type) {
+                window.gameManager.registerHit(this.data.hand, this.data.type, this.worldPos);
+              } else {
+                // right hand, wrong technique (or barely moving) - contact
+                // registers, but it doesn't count as landing that punch
+                window.gameManager.registerSloppyHit(this.data.hand);
+              }
+            }
             return;
           }
         }
@@ -183,29 +399,54 @@
       },
       spawnTarget: function () {
         var hand = Math.random() < 0.5 ? 'left' : 'right';
+        var type = PUNCH_TYPES[Math.floor(Math.random() * PUNCH_TYPES.length)];
         var side = hand === 'left' ? -1 : 1;
-        var x = side * (0.18 + Math.random() * 0.4);
-        var y = 1.05 + Math.random() * 0.55;
-        var speed = 4.2 + Math.random() * 1.1;
+
+        // Placement hints at the motion each punch needs: hooks sit
+        // further out to the side (a lateral sweep to reach them), and
+        // uppercuts sit lower, near stomach/chin height (a rising punch
+        // from below), while straights sit centered at chest/head height.
+        var x, y;
+        if (type === 'hook') {
+          x = side * (0.55 + Math.random() * 0.35);
+          y = 1.15 + Math.random() * 0.35;
+        } else if (type === 'uppercut') {
+          x = side * (0.12 + Math.random() * 0.22);
+          y = 0.8 + Math.random() * 0.25;
+        } else {
+          x = side * (0.18 + Math.random() * 0.35);
+          y = 1.15 + Math.random() * 0.45;
+        }
+        var speed = 4.0 + Math.random() * 1.2;
 
         var el = document.createElement('a-entity');
         el.setAttribute('position', x + ' ' + y + ' -12');
-        el.setAttribute('flying-target', 'hand: ' + hand + '; speed: ' + speed);
+        el.setAttribute('flying-target', 'hand: ' + hand + '; type: ' + type + '; speed: ' + speed);
         this.targetsEl.appendChild(el);
       },
-      registerHit: function (hand) {
+      registerHit: function (hand, type, worldPos) {
         this.score += 10 + Math.min(this.streak, 20) * 2;
         this.streak += 1;
         pulseGlove(hand, 0.8, 70);
+        showPunchLabel(hand, type, worldPos);
+        playHitSound();
+        this.updateHUD();
+      },
+      registerSloppyHit: function (hand) {
+        this.streak = 0;
+        pulseGlove(hand, 0.3, 50);
+        playMissSound();
         this.updateHUD();
       },
       registerWrongHand: function (hand) {
         this.streak = 0;
         pulseGlove(hand, 0.25, 40);
+        playMissSound();
         this.updateHUD();
       },
       registerMiss: function () {
         this.streak = 0;
+        playMissSound();
         this.updateHUD();
       },
       updateHUD: function () {
@@ -232,10 +473,9 @@
     <a-box position="-1 0.015 -6" width="0.06" height="0.02" depth="20" color="#2ea3ff" material="emissive: #2ea3ff; emissiveIntensity: 0.9"></a-box>
     <a-box position="1 0.015 -6" width="0.06" height="0.02" depth="20" color="#ff3b3b" material="emissive: #ff3b3b; emissiveIntensity: 0.9"></a-box>
 
-    <!-- Where the mitts spawn -->
-    <a-entity id="targets"></a-entity>
-
-    <!-- Camera rig with boxing-glove hand controllers and a HUD fixed to view -->
+    <!-- Camera rig with boxing-glove hand controllers and a HUD fixed to
+         view - declared before #targets so each glove's velocity is
+         refreshed for the current frame before targets check it below. -->
     <a-entity id="rig" position="0 0 0" game-manager>
       <a-camera look-controls wasd-controls>
         <a-entity id="hud-score" text="value: SCORE   0; align: center; color: #ffffff; width: 2" position="0 -0.32 -1"></a-entity>
@@ -244,6 +484,9 @@
       <a-entity oculus-touch-controls="hand: left; model: false" boxing-glove="hand: left"></a-entity>
       <a-entity oculus-touch-controls="hand: right; model: false" boxing-glove="hand: right"></a-entity>
     </a-entity>
+
+    <!-- Where the mitts spawn -->
+    <a-entity id="targets"></a-entity>
 
   </a-scene>
 
