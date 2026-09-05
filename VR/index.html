@@ -103,8 +103,9 @@
 
     // --- Target textures: a round training-pad disc drawn on canvas -
     // black pad, a colored rim (blue for lead/left, red for rear/right,
-    // matching the gloves), and the pad's number in a white circle at
-    // its center, mirroring a real boxing-pad trainer's numbered pads.
+    // matching the gloves), with the punch's name spelled out across the
+    // face - one word per line for two-word punches (LEAD HOOK, REAR
+    // UPPERCUT, ...) so it still fits the pad at a readable size.
     // Generated once per hand+type combo and reused for every spawned
     // target so we never touch the canvas API mid-game.
     var __targetTextureCache = {};
@@ -112,7 +113,8 @@
       var key = hand + '_' + type;
       if (__targetTextureCache[key]) return __targetTextureCache[key];
       var rimColor = hand === 'left' ? '#2ea3ff' : '#ff3b3b';
-      var number = PUNCH_DEFS[key] ? PUNCH_DEFS[key].number : '';
+      var label = PUNCH_DEFS[key] ? PUNCH_DEFS[key].name : '';
+      var words = label.split(' ');
       var size = 256;
       var canvas = document.createElement('canvas');
       canvas.width = size;
@@ -135,21 +137,17 @@
       ctx.strokeStyle = 'rgba(255,255,255,0.12)';
       ctx.stroke();
 
-      // white-ringed number circle at the center
-      var circleRadius = size * 0.19;
-      ctx.beginPath();
-      ctx.arc(size / 2, size / 2, circleRadius, 0, Math.PI * 2);
-      ctx.fillStyle = '#101010';
-      ctx.fill();
-      ctx.lineWidth = 5;
-      ctx.strokeStyle = '#ffffff';
-      ctx.stroke();
-
+      // punch name, one word per line, centered in the pad
       ctx.fillStyle = '#ffffff';
-      ctx.font = 'bold ' + Math.round(size * 0.16) + 'px sans-serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillText(String(number), size / 2, size / 2 + size * 0.01);
+      var fontSize = Math.round(size * (words.length > 1 ? 0.145 : 0.19));
+      ctx.font = 'bold ' + fontSize + 'px sans-serif';
+      var lineHeight = fontSize * 1.08;
+      var startY = size / 2 - ((words.length - 1) * lineHeight) / 2;
+      words.forEach(function (word, i) {
+        ctx.fillText(word, size / 2, startY + i * lineHeight);
+      });
 
       var url = canvas.toDataURL('image/png');
       __targetTextureCache[key] = url;
@@ -316,6 +314,18 @@
           transparent: true,
           side: 'double'
         });
+
+        // Tilt the pad like a real mitt-holder would present it for that
+        // punch: hooks angle inward toward the body (mirrored per hand,
+        // so the fist has to sweep sideways to land flush), uppercuts
+        // tilt back so the face points down-and-out (a rising punch lines
+        // up with it), straights stay flat-on to the incoming fist.
+        if (this.data.type === 'hook') {
+          var yaw = this.data.hand === 'left' ? 55 : -55;
+          this.el.setAttribute('rotation', '0 ' + yaw + ' 0');
+        } else if (this.data.type === 'uppercut') {
+          this.el.setAttribute('rotation', '-45 0 0');
+        }
       },
       tick: function (time, delta) {
         if (this.done) return;
