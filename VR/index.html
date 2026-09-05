@@ -2,76 +2,250 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>Bouncing Colors VR</title>
+  <title>Boxing VR</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
+  <script>
+    // --- Target textures: a glowing ring + fist emoji drawn on canvas,
+    // generated once per hand and reused for every spawned target so we
+    // never touch the canvas API mid-game.
+    var __targetTextureCache = {};
+    function getTargetTexture(hand) {
+      if (__targetTextureCache[hand]) return __targetTextureCache[hand];
+      var color = hand === 'left' ? '#2ea3ff' : '#ff3b3b';
+      var glyph = hand === 'left' ? '\u{1F91B}' : '\u{1F91C}'; // left/right-facing fist
+      var size = 256;
+      var canvas = document.createElement('canvas');
+      canvas.width = size;
+      canvas.height = size;
+      var ctx = canvas.getContext('2d');
+      ctx.clearRect(0, 0, size, size);
+      ctx.beginPath();
+      ctx.arc(size / 2, size / 2, size / 2 - 10, 0, Math.PI * 2);
+      ctx.fillStyle = color + '30';
+      ctx.fill();
+      ctx.lineWidth = 12;
+      ctx.strokeStyle = color;
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(size / 2, size / 2, size / 2 - 30, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(6,6,14,0.88)';
+      ctx.fill();
+      ctx.font = Math.round(size * 0.5) + 'px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(glyph, size / 2, size / 2 + size * 0.03);
+      var url = canvas.toDataURL('image/png');
+      __targetTextureCache[hand] = url;
+      return url;
+    }
+
+    // Fires a short controller vibration on hit/miss, when the browser +
+    // headset exposes the Gamepad Haptic Actuator API for that hand.
+    function pulseGlove(hand, intensity, durationMs) {
+      var el = window.__gloveEls && window.__gloveEls[hand];
+      var tracked = el && el.components && el.components['tracked-controls'];
+      var gamepad = tracked && tracked.controller;
+      var actuator = gamepad && gamepad.hapticActuators && gamepad.hapticActuators[0];
+      if (actuator && actuator.pulse) {
+        actuator.pulse(intensity, durationMs);
+      }
+    }
+
+    // --- The glove worn on each hand: a controller entity with the
+    // default model hidden and a procedural glove shape attached instead,
+    // registered globally by hand so flying targets can find it.
+    AFRAME.registerComponent('boxing-glove', {
+      schema: { hand: { type: 'string', default: 'left' } },
+      init: function () {
+        var color = this.data.hand === 'left' ? '#2ea3ff' : '#ff3b3b';
+
+        var cuff = document.createElement('a-cylinder');
+        cuff.setAttribute('radius', 0.045);
+        cuff.setAttribute('height', 0.09);
+        cuff.setAttribute('color', '#161616');
+        cuff.setAttribute('rotation', '90 0 0');
+        cuff.setAttribute('position', '0 0 0.05');
+        this.el.appendChild(cuff);
+
+        var fist = document.createElement('a-sphere');
+        fist.setAttribute('radius', 0.09);
+        fist.setAttribute('color', color);
+        fist.setAttribute('scale', '1 0.85 1.2');
+        fist.setAttribute('position', '0 0 -0.06');
+        fist.setAttribute('material', 'roughness: 0.55; metalness: 0.05');
+        this.el.appendChild(fist);
+
+        var thumb = document.createElement('a-sphere');
+        thumb.setAttribute('radius', 0.032);
+        thumb.setAttribute('color', color);
+        thumb.setAttribute('position', (this.data.hand === 'left' ? '0.07' : '-0.07') + ' 0.02 -0.02');
+        this.el.appendChild(thumb);
+
+        window.__gloveEls = window.__gloveEls || {};
+        window.__gloveEls[this.data.hand] = this.el;
+      }
+    });
+
+    // --- A mitt-shaped target flying toward the player. Removes itself
+    // and reports a hit/miss/wrong-hand outcome to the game manager.
+    AFRAME.registerComponent('flying-target', {
+      schema: {
+        hand: { type: 'string', default: 'left' },
+        speed: { type: 'number', default: 4.5 }
+      },
+      init: function () {
+        this.done = false;
+        this.hitRadius = 0.24;
+        this.worldPos = new AFRAME.THREE.Vector3();
+        this.glovePos = new AFRAME.THREE.Vector3();
+
+        this.el.setAttribute('geometry', 'primitive: plane; width: 0.5; height: 0.5');
+        // Passed as an object, not a "key: value; key: value" string - the
+        // data URL itself contains a semicolon ("data:image/png;base64,..."),
+        // which would truncate mid-parse if concatenated into that string form.
+        this.el.setAttribute('material', {
+          shader: 'flat',
+          src: getTargetTexture(this.data.hand),
+          transparent: true,
+          side: 'double'
+        });
+      },
+      tick: function (time, delta) {
+        if (this.done) return;
+        var dt = delta / 1000;
+        var pos = this.el.object3D.position;
+        pos.z += this.data.speed * dt;
+
+        if (pos.z > 0.6) {
+          this.finish();
+          if (window.gameManager) window.gameManager.registerMiss();
+          return;
+        }
+
+        this.el.object3D.getWorldPosition(this.worldPos);
+
+        var correctGlove = window.__gloveEls && window.__gloveEls[this.data.hand];
+        if (correctGlove) {
+          correctGlove.object3D.getWorldPosition(this.glovePos);
+          if (this.worldPos.distanceTo(this.glovePos) < this.hitRadius) {
+            this.finish();
+            if (window.gameManager) window.gameManager.registerHit(this.data.hand);
+            return;
+          }
+        }
+
+        var otherHand = this.data.hand === 'left' ? 'right' : 'left';
+        var wrongGlove = window.__gloveEls && window.__gloveEls[otherHand];
+        if (wrongGlove) {
+          wrongGlove.object3D.getWorldPosition(this.glovePos);
+          if (this.worldPos.distanceTo(this.glovePos) < this.hitRadius) {
+            this.finish();
+            if (window.gameManager) window.gameManager.registerWrongHand(otherHand);
+            return;
+          }
+        }
+      },
+      finish: function () {
+        if (this.done) return;
+        this.done = true;
+        var el = this.el;
+        el.setAttribute('animation__pop', 'property: scale; to: 1.6 1.6 1.6; dur: 120; easing: easeOutQuad');
+        el.setAttribute('animation__fade', 'property: material.opacity; to: 0; dur: 150; easing: easeOutQuad');
+        setTimeout(function () {
+          if (el.parentNode) el.parentNode.removeChild(el);
+        }, 160);
+      }
+    });
+
+    // --- Spawns targets on a timer with a slow difficulty ramp, and
+    // tracks score/streak, updating the HUD text on every change.
+    AFRAME.registerComponent('game-manager', {
+      init: function () {
+        this.score = 0;
+        this.streak = 0;
+        this.elapsed = 0;
+        this.spawnTimer = 0;
+        this.targetsEl = document.querySelector('#targets');
+        window.gameManager = this;
+        this.updateHUD();
+      },
+      tick: function (time, delta) {
+        var dt = delta / 1000;
+        this.elapsed += dt;
+        this.spawnTimer += dt;
+
+        var interval = Math.max(0.55, 1.15 - this.elapsed * 0.004);
+        if (this.spawnTimer >= interval) {
+          this.spawnTimer = 0;
+          this.spawnTarget();
+        }
+      },
+      spawnTarget: function () {
+        var hand = Math.random() < 0.5 ? 'left' : 'right';
+        var side = hand === 'left' ? -1 : 1;
+        var x = side * (0.18 + Math.random() * 0.4);
+        var y = 1.05 + Math.random() * 0.55;
+        var speed = 4.2 + Math.random() * 1.1;
+
+        var el = document.createElement('a-entity');
+        el.setAttribute('position', x + ' ' + y + ' -12');
+        el.setAttribute('flying-target', 'hand: ' + hand + '; speed: ' + speed);
+        this.targetsEl.appendChild(el);
+      },
+      registerHit: function (hand) {
+        this.score += 10 + Math.min(this.streak, 20) * 2;
+        this.streak += 1;
+        pulseGlove(hand, 0.8, 70);
+        this.updateHUD();
+      },
+      registerWrongHand: function (hand) {
+        this.streak = 0;
+        pulseGlove(hand, 0.25, 40);
+        this.updateHUD();
+      },
+      registerMiss: function () {
+        this.streak = 0;
+        this.updateHUD();
+      },
+      updateHUD: function () {
+        var scoreEl = document.querySelector('#hud-score');
+        var streakEl = document.querySelector('#hud-streak');
+        if (scoreEl) scoreEl.setAttribute('text', 'value', 'SCORE   ' + this.score);
+        if (streakEl) streakEl.setAttribute('text', 'value', 'STREAK   ' + this.streak);
+      }
+    });
+  </script>
 </head>
 <body style="margin:0;overflow:hidden;">
 
-  <a-scene background="color:#0a0a1a">
+  <a-scene background="color:#04040a" fog="type: linear; color: #04040a; near: 3; far: 13">
 
-    <a-assets>
-      <a-mixin id="bouncer"
-        animation__bounce="property: position; dir: alternate; dur: 1400; easing: easeInOutSine; loop: true"
-        animation__spin="property: rotation; to: 0 360 0; dur: 6000; easing: linear; loop: true">
-      </a-mixin>
-    </a-assets>
+    <!-- Dim ambient + colored rim lights so the gloves and targets read against the dark -->
+    <a-light type="ambient" color="#3a3a55" intensity="0.45"></a-light>
+    <a-light type="point" position="-1.2 1.8 -3" intensity="0.5" color="#2ea3ff"></a-light>
+    <a-light type="point" position="1.2 1.8 -3" intensity="0.5" color="#ff3b3b"></a-light>
+    <a-light type="point" position="0 2.4 1" intensity="0.35" color="#ffffff"></a-light>
 
-    <!-- Ambient + point light so colors read well -->
-    <a-light type="ambient" color="#ffffff" intensity="0.6"></a-light>
-    <a-light type="point" position="0 4 0" intensity="0.8" color="#ffffff"></a-light>
+    <!-- Runway floor with glowing left/right guide stripes -->
+    <a-plane rotation="-90 0 0" position="0 0 -6" width="4" height="20" color="#0a0a14"></a-plane>
+    <a-box position="-1 0.015 -6" width="0.06" height="0.02" depth="20" color="#2ea3ff" material="emissive: #2ea3ff; emissiveIntensity: 0.9"></a-box>
+    <a-box position="1 0.015 -6" width="0.06" height="0.02" depth="20" color="#ff3b3b" material="emissive: #ff3b3b; emissiveIntensity: 0.9"></a-box>
 
-    <!-- Bouncing colorful shapes surrounding the viewer -->
-    <a-sphere mixin="bouncer" color="#ff3b6b" radius="0.4"
-      position="-3 1 -3" animation__bounce="property: position; to: -3 2.2 -3; dir: alternate; dur: 1100; easing: easeInOutSine; loop: true">
-    </a-sphere>
+    <!-- Where the mitts spawn -->
+    <a-entity id="targets"></a-entity>
 
-    <a-box mixin="bouncer" color="#3ba7ff" width="0.6" height="0.6" depth="0.6"
-      position="3 1.5 -3" animation__bounce="property: position; to: 3 2.8 -3; dir: alternate; dur: 1500; easing: easeInOutSine; loop: true">
-    </a-box>
-
-    <a-cylinder mixin="bouncer" color="#ffd23b" radius="0.35" height="0.7"
-      position="0 1 -4" animation__bounce="property: position; to: 0 2.5 -4; dir: alternate; dur: 1300; easing: easeInOutSine; loop: true">
-    </a-cylinder>
-
-    <a-octahedron mixin="bouncer" color="#3bffa0" radius="0.5"
-      position="-2 1.2 -1.5" animation__bounce="property: position; to: -2 2.6 -1.5; dir: alternate; dur: 1700; easing: easeInOutSine; loop: true">
-    </a-octahedron>
-
-    <a-dodecahedron mixin="bouncer" color="#b23bff" radius="0.45"
-      position="2 1.3 -1.5" animation__bounce="property: position; to: 2 2.7 -1.5; dir: alternate; dur: 1250; easing: easeInOutSine; loop: true">
-    </a-dodecahedron>
-
-    <a-torus mixin="bouncer" color="#ff8a3b" radius="0.4" radius-tubular="0.08"
-      position="0 1.4 2" animation__bounce="property: position; to: 0 2.9 2; dir: alternate; dur: 1600; easing: easeInOutSine; loop: true">
-    </a-torus>
-
-    <a-sphere mixin="bouncer" color="#ff3bd8" radius="0.3"
-      position="-4 1 0" animation__bounce="property: position; to: -4 2.4 0; dir: alternate; dur: 1000; easing: easeInOutSine; loop: true">
-    </a-sphere>
-
-    <a-box mixin="bouncer" color="#3bffe0" width="0.5" height="0.5" depth="0.5"
-      position="4 1 0" animation__bounce="property: position; to: 4 2.3 0; dir: alternate; dur: 1450; easing: easeInOutSine; loop: true">
-    </a-box>
-
-    <!-- Ground -->
-    <a-plane rotation="-90 0 0" width="30" height="30" color="#141428"></a-plane>
-
-    <!-- Camera rig: works for both flat browser and Quest headset/controllers -->
-    <a-entity id="rig" position="0 0 3">
-      <a-camera look-controls wasd-controls></a-camera>
-      <a-entity laser-controls="hand: left" raycaster="objects: .clickable"></a-entity>
-      <a-entity laser-controls="hand: right" raycaster="objects: .clickable"></a-entity>
+    <!-- Camera rig with boxing-glove hand controllers and a HUD fixed to view -->
+    <a-entity id="rig" position="0 0 0" game-manager>
+      <a-camera look-controls wasd-controls>
+        <a-entity id="hud-score" text="value: SCORE   0; align: center; color: #ffffff; width: 2" position="0 -0.32 -1"></a-entity>
+        <a-entity id="hud-streak" text="value: STREAK   0; align: center; color: #ffd23b; width: 1.6" position="0 -0.47 -1"></a-entity>
+      </a-camera>
+      <a-entity oculus-touch-controls="hand: left; model: false" boxing-glove="hand: left"></a-entity>
+      <a-entity oculus-touch-controls="hand: right; model: false" boxing-glove="hand: right"></a-entity>
     </a-entity>
 
   </a-scene>
-
-  <a href="video360.html" style="
-      position:fixed; top:12px; right:12px; z-index:1000;
-      background:rgba(0,0,0,0.5); color:#fff; padding:8px 14px;
-      border-radius:6px; font-family:sans-serif; text-decoration:none; font-size:14px;">
-    360&deg; Video &rarr;
-  </a>
 
 </body>
 </html>
